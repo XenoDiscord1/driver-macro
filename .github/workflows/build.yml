@@ -7,90 +7,92 @@ on:
 
 jobs:
   build:
-    name: Build (WDK + MSVC)
+    name: Build (WDK NuGet + MSVC)
     runs-on: windows-2022
 
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Cache WDK installer
-      id: cache-wdk
-      uses: actions/cache@v4
-      with:
-        path: C:\wdk_installer
-        key: wdk-10.0.22621.0
-
-    - name: Download WDK
-      if: steps.cache-wdk.outputs.cache-hit != 'true'
+    - name: Find WDK install path
       shell: pwsh
       run: |
-        New-Item -ItemType Directory -Force -Path C:\wdk_installer
-        Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/?linkid=2196230" `
-          -OutFile "C:\wdk_installer\wdksetup.exe" -UseBasicParsing
-        Write-Host "Downloaded OK"
+        # WDK устанавливается в разные места — ищем где именно
+        $possiblePaths = @(
+          "C:\Program Files (x86)\Windows Kits\10\build",
+          "C:\Program Files\Windows Kits\10\build",
+          "D:\Program Files (x86)\Windows Kits\10\build",
+          "D:\Program Files\Windows Kits\10\build"
+        )
+        foreach ($p in $possiblePaths) {
+          if (Test-Path $p) {
+            Write-Host "Found WDK build dir: $p"
+            Get-ChildItem $p | Select-Object Name
+          }
+        }
 
-    - name: Install WDK
+        # Ищем по всему диску
+        Write-Host "Searching for WindowsDriver.common.targets..."
+        Get-ChildItem -Path "C:\", "D:\" -Recurse -Filter "WindowsDriver.common.targets" `
+          -ErrorAction SilentlyContinue | Select-Object FullName
+
+    - name: Install WDK via NuGet
       shell: pwsh
       run: |
-        Write-Host "Installing WDK..."
-        Start-Process -FilePath "C:\wdk_installer\wdksetup.exe" `
-          -ArgumentList "/quiet", "/norestart", "/log", "C:\wdk_install.log" `
-          -Wait -NoNewWindow
+        # Устанавливаем NuGet
+        Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser
+        
+        # Создаём временный проект для восстановления NuGet пакетов
+        New-Item -ItemType Directory -Force -Path C:\wdk-nuget
+        
+        @"
+        <?xml version="1.0" encoding="utf-8"?>
+        <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+          <ItemGroup>
+            <PackageReference Include="Microsoft.Windows.WDK.x64" Version="10.0.22621.*" />
+            <PackageReference Include="Microsoft.Windows.SDK.CPP" Version="10.0.22621.*" />
+            <PackageReference Include="Microsoft.Windows.SDK.CPP.x64" Version="10.0.22621.*" />
+          </ItemGroup>
+        </Project>
+        "@ | Out-File -FilePath C:\wdk-nuget\packages.props -Encoding UTF8
 
-        # Ждём пока файлы появятся на диске
-        $targets = "C:\Program Files (x86)\Windows Kits\10\build\WindowsDriver.common.targets"
-        $timeout = 60
-        $elapsed = 0
-        while (-not (Test-Path $targets) -and $elapsed -lt $timeout) {
-          Start-Sleep -Seconds 3
-          $elapsed += 3
-          Write-Host "Waiting for WDK files... ($elapsed s)"
-        }
+        nuget install Microsoft.Windows.WDK.x64 -Version 10.0.22621.3 -OutputDirectory C:\wdk-nuget\packages
+        nuget install Microsoft.Windows.SDK.CPP -Version 10.0.22621.3 -OutputDirectory C:\wdk-nuget\packages
+        nuget install Microsoft.Windows.SDK.CPP.x64 -Version 10.0.22621.3 -OutputDirectory C:\wdk-nuget\packages
 
-        if (Test-Path $targets) {
-          Write-Host "WDK installed successfully"
-        } else {
-          Write-Host "WDK targets not found, showing log:"
-          if (Test-Path C:\wdk_install.log) { Get-Content C:\wdk_install.log | Select-Object -Last 30 }
-          exit 1
-        }
+        Write-Host "NuGet packages installed:"
+        Get-ChildItem C:\wdk-nuget\packages | Select-Object Name
 
-    - name: Install WDK VS Extension
+    - name: Patch vcxproj for NuGet WDK
       shell: pwsh
       run: |
-        $vsix = "C:\Program Files (x86)\Windows Kits\10\Vsix\VS2022\10.0.22621.0\WDK.vsix"
-        if (-not (Test-Path $vsix)) {
-          # Пробуем найти vsix в любой подпапке
-          $vsix = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\Vsix" `
-            -Recurse -Filter "WDK.vsix" -ErrorAction SilentlyContinue |
-            Select-Object -First 1 -ExpandProperty FullName
-        }
+        $wdkPkg = Get-ChildItem "C:\wdk-nuget\packages" -Filter "Microsoft.Windows.WDK.x64*" -Directory |
+          Select-Object -First 1
+        $sdkPkg = Get-ChildItem "C:\wdk-nuget\packages" -Filter "Microsoft.Windows.SDK.CPP.x64*" -Directory |
+          Select-Object -First 1
 
-        if ($vsix) {
-          Write-Host "Installing WDK VS extension: $vsix"
-          $vsInstallPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
-            -version "[17.0,18.0)" -property installationPath
-          $vsixInstaller = "$vsInstallPath\Common7\IDE\VSIXInstaller.exe"
-          Start-Process -FilePath $vsixInstaller `
-            -ArgumentList "/quiet", $vsix `
-            -Wait -NoNewWindow
-          Write-Host "Extension installed"
-        } else {
-          Write-Host "VSIX not found, skipping"
-        }
+        Write-Host "WDK package: $($wdkPkg.FullName)"
+        Write-Host "SDK package: $($sdkPkg.FullName)"
 
-    - name: Verify WDK targets
-      shell: pwsh
-      run: |
-        $targets = "C:\Program Files (x86)\Windows Kits\10\build\WindowsDriver.common.targets"
-        if (Test-Path $targets) {
-          Write-Host "OK: $targets"
-        } else {
-          Write-Host "ERROR: WDK targets missing!"
-          Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\build\" -ErrorAction SilentlyContinue
-          exit 1
-        }
+        # Находим targets файл
+        $wdkTargets = Get-ChildItem $wdkPkg.FullName -Recurse -Filter "WindowsDriver.common.targets" |
+          Select-Object -First 1
+        Write-Host "WDK targets: $($wdkTargets.FullName)"
+
+        # Читаем vcxproj и патчим путь к WDK
+        $vcxproj = Get-Content "driver\MouseFilter.vcxproj" -Raw
+        
+        # Добавляем PropertyGroup с путями перед закрывающим тегом Project
+        $patch = @"
+          <PropertyGroup>
+            <WDKContentRoot>$($wdkPkg.FullName)\</WDKContentRoot>
+            <WindowsSdkDir>$($sdkPkg.FullName)\</WindowsSdkDir>
+          </PropertyGroup>
+        "@
+        
+        $vcxproj = $vcxproj -replace '</Project>', "$patch`n</Project>"
+        $vcxproj | Out-File "driver\MouseFilter.vcxproj" -Encoding UTF8
+        Write-Host "vcxproj patched"
 
     - name: Build Driver
       shell: pwsh
@@ -118,9 +120,7 @@ jobs:
         $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
           -version "[17.0,18.0)" -property installationPath
         $vcvars = "$vs\VC\Auxiliary\Build\vcvars64.bat"
-
         New-Item -ItemType Directory -Force -Path artifacts\app
-
         cmd /c "`"$vcvars`" && cl.exe /nologo /W3 /O2 /EHsc /MD /I driver app\MouseMonitor.cpp /Fe:artifacts\app\MouseMonitor.exe /link user32.lib"
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
