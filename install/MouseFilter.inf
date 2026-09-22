@@ -1,0 +1,74 @@
+; MouseFilter.inf
+; Upper Filter Driver для мыши (HID/PS2/USB)
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = Mouse
+ClassGuid   = {4D36E96F-E325-11CE-BFC1-08002BE10318}
+Provider    = %ManufacturerName%
+DriverVer   = 09/22/2026,1.0.0.0
+CatalogFile = MouseFilter.cat
+
+[DestinationDirs]
+DefaultDestDir = 12   ; %SystemRoot%\System32\drivers
+
+; -------------------------------------------------------
+; Manufacturer / Models
+; -------------------------------------------------------
+[Manufacturer]
+%ManufacturerName% = Standard,NTamd64
+
+[Standard.NTamd64]
+%MouseFilter.DeviceDesc% = MouseFilter_Install, HID\VID_*&PID_*&MI_01
+; Для PS/2 мыши раскомментируйте:
+; %MouseFilter.DeviceDesc% = MouseFilter_Install, *PNP0F03
+; %MouseFilter.DeviceDesc% = MouseFilter_Install, *PNP0F0E
+
+; -------------------------------------------------------
+; Install section
+; -------------------------------------------------------
+[MouseFilter_Install.NT]
+; Мы — Upper Filter, основной драйвер устанавливаем как есть
+CopyFiles = MouseFilter_CopyFiles
+
+[MouseFilter_CopyFiles]
+MouseFilter.sys
+
+[MouseFilter_Install.NT.HW]
+AddReg = MouseFilter_AddReg
+
+; Прописываем себя как Upper Filter над существующим стеком
+[MouseFilter_AddReg]
+HKR,,"UpperFilters",0x00010008,"MouseFilter"
+
+; -------------------------------------------------------
+; Services
+; -------------------------------------------------------
+[MouseFilter_Install.NT.Services]
+AddService = MouseFilter,, MouseFilter_Service
+
+[MouseFilter_Service]
+DisplayName    = %MouseFilter.ServiceDesc%
+ServiceType    = 1           ; SERVICE_KERNEL_DRIVER
+StartType      = 3           ; SERVICE_DEMAND_START
+ErrorControl   = 1           ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %12%\MouseFilter.sys
+LoadOrderGroup = Pointer Port
+
+; -------------------------------------------------------
+; Source Media
+; -------------------------------------------------------
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+MouseFilter.sys = 1,,
+
+; -------------------------------------------------------
+; Strings
+; -------------------------------------------------------
+[Strings]
+ManufacturerName       = "MouseFilter Project"
+DiskName               = "MouseFilter Installation Disk"
+MouseFilter.DeviceDesc = "Mouse Filter Driver"
+MouseFilter.ServiceDesc= "Mouse Filter Driver Service"
