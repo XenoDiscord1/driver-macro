@@ -28,12 +28,69 @@ jobs:
         New-Item -ItemType Directory -Force -Path C:\wdk_installer
         Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/?linkid=2196230" `
           -OutFile "C:\wdk_installer\wdksetup.exe" -UseBasicParsing
+        Write-Host "Downloaded OK"
 
     - name: Install WDK
       shell: pwsh
       run: |
+        Write-Host "Installing WDK..."
         Start-Process -FilePath "C:\wdk_installer\wdksetup.exe" `
-          -ArgumentList "/quiet", "/norestart" -Wait -NoNewWindow
+          -ArgumentList "/quiet", "/norestart", "/log", "C:\wdk_install.log" `
+          -Wait -NoNewWindow
+
+        # Ждём пока файлы появятся на диске
+        $targets = "C:\Program Files (x86)\Windows Kits\10\build\WindowsDriver.common.targets"
+        $timeout = 60
+        $elapsed = 0
+        while (-not (Test-Path $targets) -and $elapsed -lt $timeout) {
+          Start-Sleep -Seconds 3
+          $elapsed += 3
+          Write-Host "Waiting for WDK files... ($elapsed s)"
+        }
+
+        if (Test-Path $targets) {
+          Write-Host "WDK installed successfully"
+        } else {
+          Write-Host "WDK targets not found, showing log:"
+          if (Test-Path C:\wdk_install.log) { Get-Content C:\wdk_install.log | Select-Object -Last 30 }
+          exit 1
+        }
+
+    - name: Install WDK VS Extension
+      shell: pwsh
+      run: |
+        $vsix = "C:\Program Files (x86)\Windows Kits\10\Vsix\VS2022\10.0.22621.0\WDK.vsix"
+        if (-not (Test-Path $vsix)) {
+          # Пробуем найти vsix в любой подпапке
+          $vsix = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\Vsix" `
+            -Recurse -Filter "WDK.vsix" -ErrorAction SilentlyContinue |
+            Select-Object -First 1 -ExpandProperty FullName
+        }
+
+        if ($vsix) {
+          Write-Host "Installing WDK VS extension: $vsix"
+          $vsInstallPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+            -version "[17.0,18.0)" -property installationPath
+          $vsixInstaller = "$vsInstallPath\Common7\IDE\VSIXInstaller.exe"
+          Start-Process -FilePath $vsixInstaller `
+            -ArgumentList "/quiet", $vsix `
+            -Wait -NoNewWindow
+          Write-Host "Extension installed"
+        } else {
+          Write-Host "VSIX not found, skipping"
+        }
+
+    - name: Verify WDK targets
+      shell: pwsh
+      run: |
+        $targets = "C:\Program Files (x86)\Windows Kits\10\build\WindowsDriver.common.targets"
+        if (Test-Path $targets) {
+          Write-Host "OK: $targets"
+        } else {
+          Write-Host "ERROR: WDK targets missing!"
+          Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\build\" -ErrorAction SilentlyContinue
+          exit 1
+        }
 
     - name: Build Driver
       shell: pwsh
@@ -42,13 +99,18 @@ jobs:
           -version "[17.0,18.0)" -requires Microsoft.Component.MSBuild `
           -find MSBuild\**\Bin\MSBuild.exe | Select-Object -First 1
 
+        Write-Host "MSBuild: $msbuild"
         New-Item -ItemType Directory -Force -Path artifacts\driver
 
         & $msbuild driver\MouseFilter.vcxproj `
           /p:Configuration=Release `
           /p:Platform=x64 `
-          /p:OutDir=${{ github.workspace }}\artifacts\driver\ `
-          /m /verbosity:minimal
+          /p:OutDir="${{ github.workspace }}\artifacts\driver\" `
+          /p:IntDir="${{ github.workspace }}\obj\driver\" `
+          /m /verbosity:normal
+
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        Write-Host "Driver built OK"
 
     - name: Build App
       shell: pwsh
@@ -60,6 +122,7 @@ jobs:
         New-Item -ItemType Directory -Force -Path artifacts\app
 
         cmd /c "`"$vcvars`" && cl.exe /nologo /W3 /O2 /EHsc /MD /I driver app\MouseMonitor.cpp /Fe:artifacts\app\MouseMonitor.exe /link user32.lib"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     - name: Copy install files
       shell: pwsh
